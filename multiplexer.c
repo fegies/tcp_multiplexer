@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <errno.h>
@@ -14,9 +15,9 @@
 
 static char is_incoming = 1;
 
-#define LOG_MSG(msg, ...) fprintf(stderr, "%s " msg, is_incoming ? "[incoming]" : "[outgoing]", ##__VA_ARGS__ )
+#define LOG_MSG(msg, ...) fprintf(stderr, "%s " msg, is_incoming ? "[in] " : "[out]" ,##__VA_ARGS__ )
 
-int setupServerSocket(int listen_port)
+int setupServerSocket(uint16_t listen_port)
 {
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -100,34 +101,59 @@ int handleIncomingRead(struct pollSet* pollset, size_t index, struct connectionS
     }
 }
 
-int handleIncomingTunnelRead(struct pollSet* pollset, size_t index, struct connectionSet* connset, int tunnel_fd, char open_missing_connections)
+int handleIncomingTunnelRead(struct pollSet* pollset, size_t index, struct connectionSet* connset, int tunnel_fd_rd, int tunnel_fd_wr, char open_missing_connections)
 {
     u_int8_t header[3];
-    read(tunnel_fd, header, 3);
+    read(tunnel_fd_rd, header, 3);
     u_int8_t connection = header[0];
     u_int16_t payload_size = (((u_int16_t) header[1]) << 8) | (u_int16_t) header[2];
     enum connection_status status = connset->connections[connection].status;
     if( status == CONNECTION_STATUS_CLOSED && open_missing_connections ) {
+        if( payload_size == 0 ) {
+            LOG_MSG("REFUSING to open connection for payload size 0\n");
+            u_int8_t returnHeader[3] = {connection, 0, 0};
+            write(tunnel_fd_wr, returnHeader, 3);
+            return -2;
+        }
         LOG_MSG("Opening new connection %d to target\n", connection);
         int fd = openOutgoingSocket();
-        if( fd < 0 )
+        if( fd < 0 ) {
+            LOG_MSG("FAILED TO OPEN CONNECTION\n");
+            while( payload_size > 0 ) {
+                u_int8_t buf[payload_size];
+                ssize_t read_size = read(tunnel_fd_rd, buf, payload_size);
+                if( read_size <= 0 ) {
+                    LOG_MSG("COULD NOT EMPTY BUFFER\n");
+                    exit(2);
+                }
+                payload_size -= read_size;
+            }
+            u_int8_t returnHeader[3] = {connection, 0, 0};
+            write(tunnel_fd_wr, returnHeader, 3);
             return -1;
+        }
         connset->connections[connection] = (struct connection) {.status = CONNECTION_STATUS_OPEN, .fd = fd};
         status = CONNECTION_STATUS_OPEN;
         pollSet_add_socket(pollset, fd, (struct fdinfo) {.type = FDTYPE_CONNECTIONSOCKET, .connection = connection});
+    }
+    if( status != CONNECTION_STATUS_OPEN && status != CONNECTION_STATUS_READ_CLOSED ) {
+        if( payload_size == 0 ) {
+            LOG_MSG("ignoring shutdown command for already closed connection %d\n", connection);
+            return 0;
+        }
+        LOG_MSG("connection %d has invalid status %s \n", connection, status == CONNECTION_STATUS_CLOSED ? "closed" : "wr_closed");
     }
     assert(status == CONNECTION_STATUS_OPEN || status == CONNECTION_STATUS_READ_CLOSED);
     if( payload_size == 0 ) { // close the writing end of the connection
         LOG_MSG("closing connection %d\n", connection);
         connectionSet_shutdown_wr(connset, connection);
-        pollSet_remove_socket(pollset, index);
     }
     else {
         LOG_MSG("receiving payload of size %d from tunnel for connection %d\n", payload_size, connection);
         u_int8_t message_buffer[payload_size];
         size_t payload_size_received = 0;
         while( payload_size_received < payload_size ) {
-            size_t read_size = read(tunnel_fd, message_buffer+payload_size_received, payload_size - payload_size_received);
+            ssize_t read_size = read(tunnel_fd_rd, message_buffer+payload_size_received, payload_size - payload_size_received);
             assert( read_size >= 0 );
             payload_size_received += read_size;
         }
@@ -145,6 +171,7 @@ struct callback_arg {
 
 int poll_incoming_side_callback(struct pollSet *set, size_t index, struct callback_arg* arg)
 {
+//    LOG_MSG("CALLBACK CALLED\n");
     struct pollfd *pollfd = set->poll_fds + index;
     if( (pollfd->revents & POLLIN) == POLLIN ) {
         struct fdinfo *fdinfo = set->fdinfo + index;
@@ -156,13 +183,13 @@ int poll_incoming_side_callback(struct pollSet *set, size_t index, struct callba
                 handleIncomingRead(set, index, arg->connset, arg->tunnel_fd_wr);
                 break;
             case FDTYPE_TUNNELSOCKET:
-                handleIncomingTunnelRead(set, index, arg->connset, arg->tunnel_fd_rd, 0);
+                handleIncomingTunnelRead(set, index, arg->connset, arg->tunnel_fd_rd, arg->tunnel_fd_wr, 0);
                 break;
         }
         return 0;
     }
     else {
-        fprintf(stderr, "ON INPUT POLL\n");
+        LOG_MSG("ERROR ON INPUT POLL\n");
         return -1;
     }
 }
@@ -173,6 +200,7 @@ int poll_incoming_side_callback_vp(struct pollSet *set, size_t index, void* arg)
 
 int poll_outgoing_side_callback(struct pollSet *set, size_t index, struct callback_arg *arg)
 {
+//    LOG_MSG("CALLBACK CALLED\n");
     struct pollfd *pollfd = set->poll_fds + index;
     if( (pollfd->revents & POLLIN) == POLLIN ) {
         struct fdinfo *fdinfo = set->fdinfo + index;
@@ -181,7 +209,7 @@ int poll_outgoing_side_callback(struct pollSet *set, size_t index, struct callba
                 handleIncomingRead(set, index, arg->connset, arg->tunnel_fd_wr);
                 break;
             case FDTYPE_TUNNELSOCKET:
-                handleIncomingTunnelRead(set, index, arg->connset, arg->tunnel_fd_rd, 1);
+                handleIncomingTunnelRead(set, index, arg->connset, arg->tunnel_fd_rd, arg->tunnel_fd_wr, 1);
                 break;
             default:
                 assert(0 && "invalid fd type: listensocket on outgoing side");
@@ -189,7 +217,7 @@ int poll_outgoing_side_callback(struct pollSet *set, size_t index, struct callba
         return 0;
     }
     else {
-        fprintf(stderr, "ON INPUT POLL\n");
+        LOG_MSG("ERROR ON INPUT POLL\n");
         return -1;
     }
 }
@@ -230,10 +258,6 @@ int runIncomingSide()
     LOG_MSG("starting\n");
     int listen_port = 8001;
 
-    int listen_fd = setupServerSocket(listen_port);
-    if( listen_fd < 0 )
-        return 1;
-
     int out_pipe[2];
     if( pipe(out_pipe) < 0 )
         return 3;
@@ -259,6 +283,9 @@ int runIncomingSide()
     int tunnel_fd_rd = in_pipe[0];
     int tunnel_fd_wr = out_pipe[1];
     
+    int listen_fd = setupServerSocket(listen_port);
+    if( listen_fd < 0 )
+        return 1;
 
     struct connectionSet connectionset;
     connectionSet_init(&connectionset);
