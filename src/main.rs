@@ -246,117 +246,107 @@ fn get_stdout(child: &Child) -> &mut tokio::process::ChildStdout {
     }
 }
 
-fn run_incoming(progname: String) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_incoming(progname: String) -> Result<(), Box<dyn std::error::Error>> {
     log!("Running incoming");
     let addr: std::net::SocketAddrV4 = "0.0.0.0:8001".parse().unwrap();
 
-    let server = async move {
-        let (tx, mut rx) = mpsc::channel::<DispatcherTunnelMessage>(10);
-        let dispatcher = Arc::new(Dispatcher::new(tx));
-        let dispatcher_inner = dispatcher.clone();
+    
+    let (tx, mut rx) = mpsc::channel::<DispatcherTunnelMessage>(10);
+    let dispatcher = Arc::new(Dispatcher::new(tx));
+    let dispatcher_inner = dispatcher.clone();
+
+    tokio::spawn(async move {
+        let child = Arc::new(
+            tokio::process::Command::new(progname)
+                .arg("--outgoing")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let child_inner = child.clone();
+
+        let pipe_write = get_stdin(&child);
+        let mut framed_tunnel_write = FramedWrite::new(pipe_write, TunnelCodec::new());
 
         tokio::spawn(async move {
-            let child = Arc::new(
-                tokio::process::Command::new(progname)
-                    .arg("--outgoing")
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .spawn()
-                    .unwrap(),
-            );
-            let child_inner = child.clone();
-
-            let pipe_write = get_stdin(&child);
-            let mut framed_tunnel_write = FramedWrite::new(pipe_write, TunnelCodec::new());
-
-            tokio::spawn(async move {
-                let pipe_read = get_stdout(&child_inner);
-                let mut framed_tunnel_read = FramedRead::new(pipe_read, TunnelCodec::new());
-                loop {
-                    let val = framed_tunnel_read.next().await.unwrap().unwrap();
-                    dispatcher_inner
-                        .dispatch_message_to_incoming(val)
-                        .await
-                        .unwrap();
-                }
-            });
-
+            let pipe_read = get_stdout(&child_inner);
+            let mut framed_tunnel_read = FramedRead::new(pipe_read, TunnelCodec::new());
             loop {
-                let val = rx.recv().await.unwrap();
-                // log!("{} into tunnel: {:?}", val.id, val.payload);
-                framed_tunnel_write.send(val).await.unwrap();
+                let val = framed_tunnel_read.next().await.unwrap().unwrap();
+                dispatcher_inner
+                    .dispatch_message_to_incoming(val)
+                    .await
+                    .unwrap();
             }
-            // this is a kind of type annotation
-            // Ok::<(), std::io::Error>(())
         });
 
-        let mut listener = TcpListener::bind(&addr).await?;
-
         loop {
-            let (sock, _) = listener.accept().await?;
-            let disp = dispatcher.clone();
-            tokio::spawn(async move {
-                disp.handle_connection(sock).await.unwrap();
-            });
+            let val = rx.recv().await.unwrap();
+            // log!("{} into tunnel: {:?}", val.id, val.payload);
+            framed_tunnel_write.send(val).await.unwrap();
         }
-    };
+        // this is a kind of type annotation
+        // Ok::<(), std::io::Error>(())
+    });
 
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(server)
+    let mut listener = TcpListener::bind(&addr).await?;
+
+    loop {
+        let (sock, _) = listener.accept().await?;
+        let disp = dispatcher.clone();
+        tokio::spawn(async move {
+            disp.handle_connection(sock).await.unwrap();
+        });
+    }
 }
 
 
 
-fn run_outgoing() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_outgoing() -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         IN_OR_OUT = "outgoing >>>";
     }
     log!("Running outgoing");
 
-    let fut = async move {
-        let mut pipe_in = FramedRead::new(tokio::io::stdin(), TunnelCodec::new());
-        
-        let (mut tx, mut rx) = mpsc::channel::<DispatcherTunnelMessage>(10);
-        let dispatcher = Arc::new(Dispatcher::new(tx.clone()));
+    
+    let mut pipe_in = FramedRead::new(tokio::io::stdin(), TunnelCodec::new());
+    
+    let (mut tx, mut rx) = mpsc::channel::<DispatcherTunnelMessage>(10);
+    let dispatcher = Arc::new(Dispatcher::new(tx.clone()));
 
-        tokio::spawn(async move {
-            let mut pipe_out = FramedWrite::new(tokio::io::stdout(), TunnelCodec::new());
-            while let Some(d) = rx.recv().await {
-                // log!("{} into tunnel: {:?}",d.id, d);
-                pipe_out.send(d).await.unwrap();
-            }
-        });
-
-        while let Some(Ok(d)) = pipe_in.next().await {
-            let id = d.id;
-            if dispatcher.dispatch_message_to_outgoing(d).await.is_err() {
-                log!("{} could not establish connection. terminating", id);
-                tx.send(DispatcherTunnelMessage {
-                    id,
-                    payload: DispatcherMessage::CloseConnection,
-                }).await.unwrap();
-            };
-            // let guard = dispatcher.state.lock().await;
-            // let entry =
+    tokio::spawn(async move {
+        let mut pipe_out = FramedWrite::new(tokio::io::stdout(), TunnelCodec::new());
+        while let Some(d) = rx.recv().await {
+            // log!("{} into tunnel: {:?}",d.id, d);
+            pipe_out.send(d).await.unwrap();
         }
-        Ok(())
-    };
+    });
 
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(fut)
+    while let Some(Ok(d)) = pipe_in.next().await {
+        let id = d.id;
+        if dispatcher.dispatch_message_to_outgoing(d).await.is_err() {
+            log!("{} could not establish connection. terminating", id);
+            tx.send(DispatcherTunnelMessage {
+                id,
+                payload: DispatcherMessage::CloseConnection,
+            }).await.unwrap();
+        };
+    }
+    Ok(())
 }
 
 static mut IN_OR_OUT: &str = "incoming <<<"; //>= std::cell::RefCell::new("incoming");
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args();
     let prog = args.next().unwrap();
     match args.next() {
         Some(s) => match s.as_ref() {
-            "--outgoing" => run_outgoing(),
-            _ => run_incoming(prog),
+            "--outgoing" => run_outgoing().await,
+            _ => run_incoming(prog).await,
         },
-        _ => run_incoming(prog),
+        _ => run_incoming(prog).await,
     }
-    .unwrap();
 }
