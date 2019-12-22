@@ -101,7 +101,10 @@ impl Dispatcher {
         Ok(())
     }
 
-    async fn dispatch_message_to_outgoing(&self, msg: DispatcherTunnelMessage) -> Result<(), Box<dyn std::error::Error>>{
+    async fn dispatch_message_to_outgoing(
+        &self,
+        msg: DispatcherTunnelMessage,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut guard = self.state.lock().await;
         log!("{} dispatching message", msg.id);
         let mut c;
@@ -118,24 +121,32 @@ impl Dispatcher {
             let (mut tx, mut rx) = mpsc::channel::<DispatcherMessage>(10);
             let connection_id = msg.id;
             log!("{} opening new outgoing connection", connection_id);
-            let tcp = TcpStream::connect("127.0.0.1:8000".parse::<std::net::SocketAddrV4>().unwrap()).await?;
+            let tcp =
+                TcpStream::connect("127.0.0.1:8000".parse::<std::net::SocketAddrV4>().unwrap())
+                    .await?;
             let (mut tcp_in, mut tcp_out) = tokio::io::split(tcp);
 
             //handle the outgoing tcp side
             tokio::spawn(async move {
                 while let Some(DispatcherMessage::IncomingData(d, seq_num)) = rx.recv().await {
-                    log!("{} writing seq {}, {} bytes", connection_id, seq_num, d.len());
+                    log!(
+                        "{} writing seq {}, {} bytes",
+                        connection_id,
+                        seq_num,
+                        d.len()
+                    );
                     if tcp_out.write_all(&d).await.is_err() {
                         log!("{} write error", connection_id);
                         break;
                     }
                 }
                 log!("{} shutting down outgoing", connection_id);
-                tcp_out.shutdown().await;
+                if let Err(e) = tcp_out.shutdown().await {
+                    log!("{} shutdown failed: {:?}", connection_id, e);
+                }
             });
 
             guard.connections.insert(connection_id, tx.clone());
-            
 
             //handle the incoming tcp side
             let mut dispatcher_channel = self.channel.clone();
@@ -143,25 +154,43 @@ impl Dispatcher {
                 let mut bytes = BytesMut::with_capacity(BUF_SIZE);
                 let mut seq_count = 0;
                 while let Ok(bytes_read) = tcp_in.read_buf(&mut bytes).await {
-                    log!("{} read input seq {}, {} bytes", connection_id, seq_count, bytes_read);
-                    if bytes_read == 0 { break; }
-                    dispatcher_channel.send(DispatcherTunnelMessage{
-                        id: connection_id,
-                        payload: DispatcherMessage::IncomingData(Bytes::copy_from_slice(&bytes), seq_count),
-                    }).await.unwrap();
-                    seq_count+=1;
+                    log!(
+                        "{} read input seq {}, {} bytes",
+                        connection_id,
+                        seq_count,
+                        bytes_read
+                    );
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    dispatcher_channel
+                        .send(DispatcherTunnelMessage {
+                            id: connection_id,
+                            payload: DispatcherMessage::IncomingData(
+                                Bytes::copy_from_slice(&bytes),
+                                seq_count,
+                            ),
+                        })
+                        .await
+                        .unwrap();
+                    seq_count += 1;
                     bytes.clear();
                 }
                 log!("{} stream end, telling to close connection", connection_id);
-                dispatcher_channel.send(DispatcherTunnelMessage {
-                    id: connection_id,
-                    payload: DispatcherMessage::CloseConnection,
-                }).await.unwrap();
+                dispatcher_channel
+                    .send(DispatcherTunnelMessage {
+                        id: connection_id,
+                        payload: DispatcherMessage::CloseConnection,
+                    })
+                    .await
+                    .unwrap();
             });
             tx.send(msg.payload).await?;
-
         } else {
-            log!("{} got channel close message but channel already closed", msg.id);
+            log!(
+                "{} got channel close message but channel already closed",
+                msg.id
+            );
         }
         Ok(())
     }
@@ -176,19 +205,29 @@ impl Dispatcher {
             let mut bytes = BytesMut::with_capacity(BUF_SIZE);
             let mut seq_count = 0;
             while let Ok(bytes_read) = tcp_in.read_buf(&mut bytes).await {
-                if bytes_read == 0 { break; }
-                log!("{} read input: seq {}, {} bytes", connection_id, seq_count, bytes.len());
+                if bytes_read == 0 {
+                    break;
+                }
+                log!(
+                    "{} read input: seq {}, {} bytes",
+                    connection_id,
+                    seq_count,
+                    bytes.len()
+                );
                 dispatcher_channel_write
                     .send(DispatcherTunnelMessage {
                         id: connection_id,
-                        payload: DispatcherMessage::IncomingData(Bytes::copy_from_slice(&bytes), seq_count),
+                        payload: DispatcherMessage::IncomingData(
+                            Bytes::copy_from_slice(&bytes),
+                            seq_count,
+                        ),
                     })
                     .await?;
-                    seq_count += 1;
-                    bytes.clear();
+                seq_count += 1;
+                bytes.clear();
             }
             log!("{} stream end, telling to close connection", connection_id);
-            
+
             dispatcher_channel_write
                 .send(DispatcherTunnelMessage {
                     id: connection_id,
@@ -203,7 +242,12 @@ impl Dispatcher {
             continue_loop = false;
             match dispatcher_channel_read.recv().await {
                 Some(DispatcherMessage::IncomingData(data, seq_num)) => {
-                    log!("{} writing seq {} {} bytes", connection_id, seq_num, data.len());
+                    log!(
+                        "{} writing seq {} {} bytes",
+                        connection_id,
+                        seq_num,
+                        data.len()
+                    );
                     tcp_out.write_all(&data).await?;
                     continue_loop = true;
                 }
@@ -250,7 +294,6 @@ async fn run_incoming(progname: String) -> Result<(), Box<dyn std::error::Error>
     log!("Running incoming");
     let addr: std::net::SocketAddrV4 = "0.0.0.0:8001".parse().unwrap();
 
-    
     let (tx, mut rx) = mpsc::channel::<DispatcherTunnelMessage>(10);
     let dispatcher = Arc::new(Dispatcher::new(tx));
     let dispatcher_inner = dispatcher.clone();
@@ -301,17 +344,14 @@ async fn run_incoming(progname: String) -> Result<(), Box<dyn std::error::Error>
     }
 }
 
-
-
 async fn run_outgoing() -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         IN_OR_OUT = "outgoing >>>";
     }
     log!("Running outgoing");
 
-    
     let mut pipe_in = FramedRead::new(tokio::io::stdin(), TunnelCodec::new());
-    
+
     let (mut tx, mut rx) = mpsc::channel::<DispatcherTunnelMessage>(10);
     let dispatcher = Arc::new(Dispatcher::new(tx.clone()));
 
@@ -330,7 +370,9 @@ async fn run_outgoing() -> Result<(), Box<dyn std::error::Error>> {
             tx.send(DispatcherTunnelMessage {
                 id,
                 payload: DispatcherMessage::CloseConnection,
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
         };
     }
     Ok(())

@@ -36,9 +36,10 @@ impl Encoder for TunnelCodec {
                 buf.put_u32(0);
                 buf
             }
-            DispatcherMessage::IncomingData(data,seq_num) => {
-                let mut buf =
-                    BytesMut::with_capacity(data.len() + 1 + 4 + std::mem::size_of::<ConnectionId>());
+            DispatcherMessage::IncomingData(data, seq_num) => {
+                let mut buf = BytesMut::with_capacity(
+                    data.len() + 1 + 4 + std::mem::size_of::<ConnectionId>(),
+                );
                 buf.put_u8(1);
                 put_con_id(&mut buf, item.id);
                 buf.put_u32(seq_num);
