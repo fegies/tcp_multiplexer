@@ -47,6 +47,10 @@ struct Dispatcher {
     channel: mpsc::Sender<DispatcherTunnelMessage>,
 }
 
+async fn into_future<A>(a: A) -> A {
+    a
+}
+
 impl Dispatcher {
     fn new(tunnel_channel: mpsc::Sender<DispatcherTunnelMessage>) -> Self {
         Dispatcher {
@@ -78,27 +82,42 @@ impl Dispatcher {
         }
     }
 
+    async fn dispatch_message<F, FF, FFE>(&self, msg: DispatcherTunnelMessage, missing_chan_cb: F) -> Result<(), FFE> where
+    F: FnOnce(&DispatcherTunnelMessage) -> FF,
+    FF: std::future::Future<Output=Result<mpsc::Sender<DispatcherMessage>,FFE>> {
+        let mut guard = self.state.lock().await;
+        log!("{} dispatching message", msg.id);
+        match msg.payload {
+            DispatcherMessage::CloseConnection => {
+                log!("{} got channel close message", msg.id);
+                if let Some(mut chan) = guard.connections.remove(&msg.id) {
+                    chan.send(msg.payload).await.unwrap();
+                }
+            },
+            _ => {
+                match guard.connections.entry(msg.id) {
+                    Entry::Occupied(mut e) => e.get_mut().send(msg.payload).await.unwrap(),
+                    Entry::Vacant(e) => {
+                        log!("{} no channel present, trying to get one", msg.id);
+                        let chan = missing_chan_cb(&msg).await?;
+                        e.insert(chan).send(msg.payload).await.unwrap();
+                    }
+                }
+            }
+        };
+        Ok(())
+    }
+
+    
+
     async fn dispatch_message_to_incoming(
         &self,
         msg: DispatcherTunnelMessage,
-    ) -> Result<(), mpsc::error::SendError<DispatcherMessage>> {
-        let mut guard = self.state.lock().await;
-        log!("{} dispatching message", msg.id);
-        let mut c;
-        let chan = match msg.payload {
-            DispatcherMessage::CloseConnection => {
-                log!("{} got channel close message", msg.id);
-                c = guard.connections.remove(&msg.id);
-                c.as_mut()
-            }
-            _ => guard.connections.get_mut(&msg.id),
-        };
-        if let Some(channel) = chan {
-            channel.send(msg.payload).await?;
-        } else {
-            log!("{} got message but no channel present", msg.id);
-        }
-        Ok(())
+    ) -> Result<(), ()> {
+        self.dispatch_message(msg, |m| {
+            log!("{} refusing to open missing connection", m.id);
+            into_future(Err(()))
+        }).await
     }
 
     async fn dispatch_message_to_outgoing(
