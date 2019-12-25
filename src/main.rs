@@ -78,59 +78,66 @@ async fn handle_tcp_write_end<O>(
     }
 }
 
+async fn handle_tcp_read_end<I>(
+    connection_id: ConnectionId,
+    mut tcp_in: I,
+    mut dispatcher_channel: mpsc::Sender<DispatcherTunnelMessage>,
+) where
+    I: tokio::io::AsyncRead,
+{
+    let mut bytes = BytesMut::with_capacity(BUF_SIZE);
+    let mut seq_count = 0;
+    while let Ok(bytes_read) = tcp_in.read_buf(&mut bytes).await {
+        log!(
+            "{} read input seq {}, {} bytes",
+            connection_id,
+            seq_count,
+            bytes_read
+        );
+        if bytes_read == 0 {
+            break;
+        }
+        dispatcher_channel
+            .send(DispatcherTunnelMessage {
+                id: connection_id,
+                payload: DispatcherMessage::IncomingData(Bytes::copy_from_slice(&bytes), seq_count),
+            })
+            .await
+            .unwrap();
+        seq_count += 1;
+        bytes.clear();
+    }
+    log!("{} stream end, telling to close connection", connection_id);
+    dispatcher_channel
+        .send(DispatcherTunnelMessage {
+            id: connection_id,
+            payload: DispatcherMessage::CloseConnection,
+        })
+        .await
+        .unwrap();
+}
+
 async fn dispatch_message_to_outgoing(
     dispatcher: &Dispatcher,
     msg: DispatcherTunnelMessage,
 ) -> Result<(), Box<dyn std::error::Error>> {
     async fn missing_chan_cb(
         connection_id: ConnectionId,
-        mut dispatcher_channel: mpsc::Sender<DispatcherTunnelMessage>,
+        dispatcher_channel: mpsc::Sender<DispatcherTunnelMessage>,
     ) -> Result<mpsc::Sender<DispatcherMessage>, Box<dyn std::error::Error>> {
         let (tx, rx) = mpsc::channel::<DispatcherMessage>(10);
         log!("{} opening new outgoing connection", connection_id);
         let tcp =
             TcpStream::connect("127.0.0.1:8000".parse::<std::net::SocketAddrV4>().unwrap()).await?;
 
-        let (mut tcp_in, tcp_out) = tokio::io::split(tcp);
+        let (tcp_in, tcp_out) = tokio::io::split(tcp);
 
         //handle the outgoing tcp side
         tokio::spawn(async move { handle_tcp_write_end(connection_id, rx, tcp_out).await });
 
         //handle the incoming tcp side
         tokio::spawn(async move {
-            let mut bytes = BytesMut::with_capacity(BUF_SIZE);
-            let mut seq_count = 0;
-            while let Ok(bytes_read) = tcp_in.read_buf(&mut bytes).await {
-                log!(
-                    "{} read input seq {}, {} bytes",
-                    connection_id,
-                    seq_count,
-                    bytes_read
-                );
-                if bytes_read == 0 {
-                    break;
-                }
-                dispatcher_channel
-                    .send(DispatcherTunnelMessage {
-                        id: connection_id,
-                        payload: DispatcherMessage::IncomingData(
-                            Bytes::copy_from_slice(&bytes),
-                            seq_count,
-                        ),
-                    })
-                    .await
-                    .unwrap();
-                seq_count += 1;
-                bytes.clear();
-            }
-            log!("{} stream end, telling to close connection", connection_id);
-            dispatcher_channel
-                .send(DispatcherTunnelMessage {
-                    id: connection_id,
-                    payload: DispatcherMessage::CloseConnection,
-                })
-                .await
-                .unwrap();
+            handle_tcp_read_end(connection_id, tcp_in, dispatcher_channel).await;
         });
 
         Ok(tx)
@@ -147,48 +154,16 @@ async fn handle_connection(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (connection_id, dispatcher_channel_read) = dispatcher.register_connection().await;
     log!("{} registering connection", connection_id);
-    let (mut tcp_in, tcp_out) = tokio::io::split(con);
-    let mut dispatcher_channel_write = dispatcher.channel.clone();
+    let (tcp_in, tcp_out) = tokio::io::split(con);
+    let dispatcher_channel_write = dispatcher.channel.clone();
 
     let input_future = tokio::spawn(async move {
-        let mut bytes = BytesMut::with_capacity(BUF_SIZE);
-        let mut seq_count = 0;
-        while let Ok(bytes_read) = tcp_in.read_buf(&mut bytes).await {
-            if bytes_read == 0 {
-                break;
-            }
-            log!(
-                "{} read input: seq {}, {} bytes",
-                connection_id,
-                seq_count,
-                bytes.len()
-            );
-            dispatcher_channel_write
-                .send(DispatcherTunnelMessage {
-                    id: connection_id,
-                    payload: DispatcherMessage::IncomingData(
-                        Bytes::copy_from_slice(&bytes),
-                        seq_count,
-                    ),
-                })
-                .await?;
-            seq_count += 1;
-            bytes.clear();
-        }
-        log!("{} stream end, telling to close connection", connection_id);
-
-        dispatcher_channel_write
-            .send(DispatcherTunnelMessage {
-                id: connection_id,
-                payload: DispatcherMessage::CloseConnection,
-            })
-            .await?;
-        Ok::<(), tokio::sync::mpsc::error::SendError<DispatcherTunnelMessage>>(())
+        handle_tcp_read_end(connection_id, tcp_in, dispatcher_channel_write).await;
     });
 
     handle_tcp_write_end(connection_id, dispatcher_channel_read, tcp_out).await;
 
-    input_future.await??;
+    input_future.await?;
     Ok(())
 }
 
