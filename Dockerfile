@@ -2,8 +2,8 @@ FROM rust:1.40 as build
 
 WORKDIR /code
 
-ENV platform=x86_64
-ENV target=$platform-unknown-linux-musl
+ARG platform=x86_64
+ARG target=$platform-unknown-linux-musl
 RUN rustup target add $target
 
 COPY ./Cargo.toml ./
