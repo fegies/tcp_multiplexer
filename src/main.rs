@@ -148,23 +148,19 @@ async fn dispatch_message_to_outgoing(
         .await
 }
 
-async fn handle_connection(
-    dispatcher: &Dispatcher,
-    con: TcpStream,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_incoming_connection(dispatcher: &Dispatcher, con: TcpStream) {
     let (connection_id, dispatcher_channel_read) = dispatcher.register_connection().await;
     log!("{} registering connection", connection_id);
     let (tcp_in, tcp_out) = tokio::io::split(con);
     let dispatcher_channel_write = dispatcher.channel.clone();
 
-    let input_future = tokio::spawn(async move {
+    tokio::spawn(async move {
         handle_tcp_read_end(connection_id, tcp_in, dispatcher_channel_write).await;
     });
 
-    handle_tcp_write_end(connection_id, dispatcher_channel_read, tcp_out).await;
-
-    input_future.await?;
-    Ok(())
+    tokio::spawn(async move {
+        handle_tcp_write_end(connection_id, dispatcher_channel_read, tcp_out).await;
+    });
 }
 
 use tokio::process::Child;
@@ -202,6 +198,7 @@ async fn run_incoming(progname: String) -> Result<(), Box<dyn std::error::Error>
     let dispatcher = Arc::new(Dispatcher::new(tx));
     let dispatcher_inner = dispatcher.clone();
 
+    //set up the tunnel
     tokio::spawn(async move {
         let child = Arc::new(
             tokio::process::Command::new(progname)
@@ -240,10 +237,7 @@ async fn run_incoming(progname: String) -> Result<(), Box<dyn std::error::Error>
 
     loop {
         let (sock, _) = listener.accept().await?;
-        let disp = dispatcher.clone();
-        tokio::spawn(async move {
-            handle_connection(&disp, sock).await.unwrap();
-        });
+        handle_incoming_connection(&dispatcher, sock).await;
     }
 }
 
