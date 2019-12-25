@@ -4,7 +4,7 @@
 stages:
   - build
 
-.build_rest_alpine:
+build_alpine:
   stage: build
   script:
     - docker build --build-arg platform=aarch64 -f Dockerfile -t tcp_multiplexer:$CI_COMMIT_REF_SLUG-alpine .

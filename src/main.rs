@@ -298,6 +298,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prog = args.next().unwrap();
     match args.next() {
         Some(s) => match s.as_ref() {
+            "--test-binary" => Ok(()),
             "--outgoing" => run_outgoing().await,
             _ => run_incoming(prog).await,
         },

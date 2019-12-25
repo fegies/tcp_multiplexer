@@ -18,8 +18,14 @@ RUN cargo build --release --target $target
 
 RUN strip target/$target/release/tcp_multiplexer && mv target/$target/release/tcp_multiplexer target
 
-FROM alpine
+FROM alpine as done
 
 COPY --from=build /code/target/tcp_multiplexer /app/tcp_multiplexer
 
 CMD [ "/app/tcp_multiplexer" ]
+
+FROM done
+
+RUN ["/app/tcp_multiplexer", "--test-binary"]
+
+FROM done
