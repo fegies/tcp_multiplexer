@@ -82,9 +82,15 @@ impl Dispatcher {
         }
     }
 
-    async fn dispatch_message<F, FF, FFE>(&self, msg: DispatcherTunnelMessage, missing_chan_cb: F) -> Result<(), FFE> where
-    F: FnOnce(&DispatcherTunnelMessage) -> FF,
-    FF: std::future::Future<Output=Result<mpsc::Sender<DispatcherMessage>,FFE>> {
+    async fn dispatch_message<F, FF, FFE>(
+        &self,
+        msg: DispatcherTunnelMessage,
+        missing_chan_cb: F,
+    ) -> Result<(), FFE>
+    where
+        F: FnOnce(&DispatcherTunnelMessage) -> FF,
+        FF: std::future::Future<Output = Result<mpsc::Sender<DispatcherMessage>, FFE>>,
+    {
         let mut guard = self.state.lock().await;
         log!("{} dispatching message", msg.id);
         match msg.payload {
@@ -93,38 +99,35 @@ impl Dispatcher {
                 if let Some(mut chan) = guard.connections.remove(&msg.id) {
                     chan.send(msg.payload).await.unwrap();
                 }
-            },
-            _ => {
-                match guard.connections.entry(msg.id) {
-                    Entry::Occupied(mut e) => e.get_mut().send(msg.payload).await.unwrap(),
-                    Entry::Vacant(e) => {
-                        log!("{} no channel present, trying to get one", msg.id);
-                        let chan = missing_chan_cb(&msg).await?;
-                        e.insert(chan).send(msg.payload).await.unwrap();
-                    }
-                }
             }
+            _ => match guard.connections.entry(msg.id) {
+                Entry::Occupied(mut e) => e.get_mut().send(msg.payload).await.unwrap(),
+                Entry::Vacant(e) => {
+                    log!("{} no channel present, trying to get one", msg.id);
+                    let chan = missing_chan_cb(&msg).await?;
+                    e.insert(chan).send(msg.payload).await.unwrap();
+                }
+            },
         };
         Ok(())
     }
 
-    
-
-    async fn dispatch_message_to_incoming(
-        &self,
-        msg: DispatcherTunnelMessage,
-    ) -> Result<(), ()> {
+    async fn dispatch_message_to_incoming(&self, msg: DispatcherTunnelMessage) -> Result<(), ()> {
         self.dispatch_message(msg, |m| {
             log!("{} refusing to open missing connection", m.id);
             into_future(Err(()))
-        }).await
+        })
+        .await
     }
 
     async fn dispatch_message_to_outgoing(
         &self,
         msg: DispatcherTunnelMessage,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        async fn missing_chan_cb(connection_id: ConnectionId, mut dispatcher_channel: mpsc::Sender<DispatcherTunnelMessage>) -> Result<mpsc::Sender<DispatcherMessage>, Box<dyn std::error::Error>> {
+        async fn missing_chan_cb(
+            connection_id: ConnectionId,
+            mut dispatcher_channel: mpsc::Sender<DispatcherTunnelMessage>,
+        ) -> Result<mpsc::Sender<DispatcherMessage>, Box<dyn std::error::Error>> {
             let (tx, mut rx) = mpsc::channel::<DispatcherMessage>(10);
             log!("{} opening new outgoing connection", connection_id);
             let tcp =
@@ -152,7 +155,7 @@ impl Dispatcher {
                     log!("{} shutdown failed: {:?}", connection_id, e);
                 }
             });
-            
+
             //handle the incoming tcp side
             tokio::spawn(async move {
                 let mut bytes = BytesMut::with_capacity(BUF_SIZE);
@@ -193,7 +196,8 @@ impl Dispatcher {
             Ok(tx)
         }
 
-        self.dispatch_message(msg, |m| missing_chan_cb(m.id, self.channel.clone())).await
+        self.dispatch_message(msg, |m| missing_chan_cb(m.id, self.channel.clone()))
+            .await
     }
 
     async fn handle_connection(&self, con: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
