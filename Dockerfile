@@ -1,6 +1,7 @@
 FROM rust:1.40 as build
 
 WORKDIR /code
+RUN apt-get update && apt-get install -y musl musl-dev musl-tools
 
 ARG platform=x86_64
 ARG target=$platform-unknown-linux-musl
