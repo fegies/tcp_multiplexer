@@ -29,6 +29,6 @@ CMD [ "/app/tcp_multiplexer" ]
 
 FROM done
 
-RUN ["/app/tcp_multiplexer", "--test-binary"]
+RUN ["/app/tcp_multiplexer", "test-binary"]
 
 FROM done

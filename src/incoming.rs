@@ -58,7 +58,7 @@ fn get_stdout(child: &Child) -> &mut tokio::process::ChildStdout {
     }
 }
 
-pub async fn run_incoming(progname: String) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_incoming(prog: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     log!("Running incoming");
     let addr: std::net::SocketAddrV4 = "0.0.0.0:8001".parse().unwrap();
 
@@ -69,8 +69,8 @@ pub async fn run_incoming(progname: String) -> Result<(), Box<dyn std::error::Er
     //set up the tunnel
     tokio::spawn(async move {
         let child = Arc::new(
-            tokio::process::Command::new(progname)
-                .arg("--outgoing")
+            tokio::process::Command::new(&prog[0])
+                .args(prog.iter().skip(1))
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .spawn()
