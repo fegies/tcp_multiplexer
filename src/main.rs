@@ -124,25 +124,13 @@ impl Dispatcher {
         &self,
         msg: DispatcherTunnelMessage,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut guard = self.state.lock().await;
-        log!("{} dispatching message", msg.id);
-        let mut c;
-        let chan = match msg.payload {
-            DispatcherMessage::CloseConnection => {
-                c = guard.connections.remove(&msg.id);
-                c.as_mut()
-            }
-            _ => guard.connections.get_mut(&msg.id),
-        };
-        if let Some(channel) = chan {
-            channel.send(msg.payload).await.unwrap();
-        } else if msg.payload != DispatcherMessage::CloseConnection {
-            let (mut tx, mut rx) = mpsc::channel::<DispatcherMessage>(10);
-            let connection_id = msg.id;
+        async fn missing_chan_cb(connection_id: ConnectionId, mut dispatcher_channel: mpsc::Sender<DispatcherTunnelMessage>) -> Result<mpsc::Sender<DispatcherMessage>, Box<dyn std::error::Error>> {
+            let (tx, mut rx) = mpsc::channel::<DispatcherMessage>(10);
             log!("{} opening new outgoing connection", connection_id);
             let tcp =
                 TcpStream::connect("127.0.0.1:8000".parse::<std::net::SocketAddrV4>().unwrap())
                     .await?;
+
             let (mut tcp_in, mut tcp_out) = tokio::io::split(tcp);
 
             //handle the outgoing tcp side
@@ -164,11 +152,8 @@ impl Dispatcher {
                     log!("{} shutdown failed: {:?}", connection_id, e);
                 }
             });
-
-            guard.connections.insert(connection_id, tx.clone());
-
+            
             //handle the incoming tcp side
-            let mut dispatcher_channel = self.channel.clone();
             tokio::spawn(async move {
                 let mut bytes = BytesMut::with_capacity(BUF_SIZE);
                 let mut seq_count = 0;
@@ -204,14 +189,11 @@ impl Dispatcher {
                     .await
                     .unwrap();
             });
-            tx.send(msg.payload).await?;
-        } else {
-            log!(
-                "{} got channel close message but channel already closed",
-                msg.id
-            );
+
+            Ok(tx)
         }
-        Ok(())
+
+        self.dispatch_message(msg, |m| missing_chan_cb(m.id, self.channel.clone())).await
     }
 
     async fn handle_connection(&self, con: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
