@@ -8,12 +8,19 @@ use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+#[cfg(feature="logging")]
 macro_rules! log {
     ($fmt:expr) => {
         eprintln!(concat!("[{}] ", $fmt), unsafe { IN_OR_OUT })
     };
     ($fmt:expr, $($args:expr),*) => {
         eprintln!(concat!("[{}] ", $fmt), unsafe { IN_OR_OUT }, $($args),*)
+    };
+}
+#[cfg(not(feature="logging"))]
+macro_rules! log {
+    ($($args:expr),*) => {
+        
     };
 }
 
@@ -46,35 +53,43 @@ async fn dispatch_message_to_incoming(
     msg: DispatcherTunnelMessage,
 ) -> Result<(), ()> {
     dispatcher
-        .dispatch_message(msg, |m| {
-            log!("{} refusing to open missing connection", m.id);
+        .dispatch_message(msg, |_m| {
+            log!("{} refusing to open missing connection", _m.id);
             into_future(Err(()))
         })
         .await
 }
 
+async fn drain_receiver<T>(mut rx: mpsc::Receiver<T>) {
+    while let Some(_) = rx.recv().await {}
+}
+
 async fn handle_tcp_write_end<O>(
-    connection_id: ConnectionId,
+    _connection_id: ConnectionId,
     mut rx: mpsc::Receiver<DispatcherMessage>,
     mut tcp_out: O,
 ) where
     O: tokio::io::AsyncWrite + std::marker::Unpin,
 {
-    while let Some(DispatcherMessage::IncomingData(d, seq_num)) = rx.recv().await {
+    while let Some(DispatcherMessage::IncomingData(d, _seq_num)) = rx.recv().await {
         log!(
             "{} writing seq {}, {} bytes",
-            connection_id,
-            seq_num,
+            _connection_id,
+            _seq_num,
             d.len()
         );
         if tcp_out.write_all(&d).await.is_err() {
-            log!("{} write error", connection_id);
+            log!(
+                "{} write error, discarding all further messages",
+                _connection_id
+            );
+            tokio::spawn(async move { drain_receiver(rx).await });
             break;
         }
     }
-    log!("{} shutting down write end", connection_id);
-    if let Err(e) = tcp_out.shutdown().await {
-        log!("{} shutdown failed: {:?}", connection_id, e);
+    log!("{} shutting down write end", _connection_id);
+    if let Err(_e) = tcp_out.shutdown().await {
+        log!("{} shutdown failed: {:?}", _connection_id, _e);
     }
 }
 
