@@ -53,6 +53,31 @@ async fn dispatch_message_to_incoming(
         .await
 }
 
+async fn handle_tcp_write_end<O>(
+    connection_id: ConnectionId,
+    mut rx: mpsc::Receiver<DispatcherMessage>,
+    mut tcp_out: O,
+) where
+    O: tokio::io::AsyncWrite + std::marker::Unpin,
+{
+    while let Some(DispatcherMessage::IncomingData(d, seq_num)) = rx.recv().await {
+        log!(
+            "{} writing seq {}, {} bytes",
+            connection_id,
+            seq_num,
+            d.len()
+        );
+        if tcp_out.write_all(&d).await.is_err() {
+            log!("{} write error", connection_id);
+            break;
+        }
+    }
+    log!("{} shutting down write end", connection_id);
+    if let Err(e) = tcp_out.shutdown().await {
+        log!("{} shutdown failed: {:?}", connection_id, e);
+    }
+}
+
 async fn dispatch_message_to_outgoing(
     dispatcher: &Dispatcher,
     msg: DispatcherTunnelMessage,
@@ -61,32 +86,15 @@ async fn dispatch_message_to_outgoing(
         connection_id: ConnectionId,
         mut dispatcher_channel: mpsc::Sender<DispatcherTunnelMessage>,
     ) -> Result<mpsc::Sender<DispatcherMessage>, Box<dyn std::error::Error>> {
-        let (tx, mut rx) = mpsc::channel::<DispatcherMessage>(10);
+        let (tx, rx) = mpsc::channel::<DispatcherMessage>(10);
         log!("{} opening new outgoing connection", connection_id);
         let tcp =
             TcpStream::connect("127.0.0.1:8000".parse::<std::net::SocketAddrV4>().unwrap()).await?;
 
-        let (mut tcp_in, mut tcp_out) = tokio::io::split(tcp);
+        let (mut tcp_in, tcp_out) = tokio::io::split(tcp);
 
         //handle the outgoing tcp side
-        tokio::spawn(async move {
-            while let Some(DispatcherMessage::IncomingData(d, seq_num)) = rx.recv().await {
-                log!(
-                    "{} writing seq {}, {} bytes",
-                    connection_id,
-                    seq_num,
-                    d.len()
-                );
-                if tcp_out.write_all(&d).await.is_err() {
-                    log!("{} write error", connection_id);
-                    break;
-                }
-            }
-            log!("{} shutting down outgoing", connection_id);
-            if let Err(e) = tcp_out.shutdown().await {
-                log!("{} shutdown failed: {:?}", connection_id, e);
-            }
-        });
+        tokio::spawn(async move { handle_tcp_write_end(connection_id, rx, tcp_out).await });
 
         //handle the incoming tcp side
         tokio::spawn(async move {
@@ -137,9 +145,9 @@ async fn handle_connection(
     dispatcher: &Dispatcher,
     con: TcpStream,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (connection_id, mut dispatcher_channel_read) = dispatcher.register_connection().await;
+    let (connection_id, dispatcher_channel_read) = dispatcher.register_connection().await;
     log!("{} registering connection", connection_id);
-    let (mut tcp_in, mut tcp_out) = tokio::io::split(con);
+    let (mut tcp_in, tcp_out) = tokio::io::split(con);
     let mut dispatcher_channel_write = dispatcher.channel.clone();
 
     let input_future = tokio::spawn(async move {
@@ -178,26 +186,7 @@ async fn handle_connection(
         Ok::<(), tokio::sync::mpsc::error::SendError<DispatcherTunnelMessage>>(())
     });
 
-    let mut continue_loop = true;
-    while continue_loop {
-        continue_loop = false;
-        match dispatcher_channel_read.recv().await {
-            Some(DispatcherMessage::IncomingData(data, seq_num)) => {
-                log!(
-                    "{} writing seq {} {} bytes",
-                    connection_id,
-                    seq_num,
-                    data.len()
-                );
-                tcp_out.write_all(&data).await?;
-                continue_loop = true;
-            }
-            _ => {
-                log!("{} shuting down", connection_id);
-                tcp_out.shutdown().await?;
-            }
-        }
-    }
+    handle_tcp_write_end(connection_id, dispatcher_channel_read, tcp_out).await;
 
     input_future.await??;
     Ok(())
