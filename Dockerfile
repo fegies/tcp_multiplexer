@@ -13,7 +13,7 @@ COPY ./Cargo.toml ./
 COPY ./Cargo.lock ./
 COPY ./src/dummy.rs ./src/dummy.rs
 
-RUN cargo build --release --locked --target $target
+RUN cargo build --release --locked --target $target --bin dummy
 
 COPY ./src/ ./src
 

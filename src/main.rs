@@ -55,21 +55,23 @@ pub struct DispatcherTunnelMessage {
 enum Opts {
     TestBinary {},
     Incoming {
-        #[structopt(short,long)]
-        tunnel_command: Vec<String>
+        command: String,
+        args: Vec<String>,
     },
     Outgoing {
-        #[structopt(short,long)]
         target_connection: std::net::SocketAddr
-    }
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Opts::from_args() {
-        Opts::TestBinary {} => {Ok(())},
-        Opts::Incoming { tunnel_command: cmd } => {
-            run_incoming(cmd).await
+        Opts::TestBinary {} => {
+            println!("binary is ok");
+            Ok(())
+        },
+        Opts::Incoming { command, args } => {
+            run_incoming(command, args).await
         },
         Opts::Outgoing { target_connection: target } => {
             unsafe {
@@ -78,19 +80,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_outgoing(target).await
         }
     }
-    // let mut args = std::env::args();
-    // let prog = args.next().unwrap();
-    // match args.next() {
-    //     Some(s) => match s.as_ref() {
-    //         "--test-binary" => Ok(()),
-    //         "--outgoing" => {
-    //             unsafe {
-    //                 IN_OR_OUT = "outgoing >>>";
-    //             }
-    //             run_outgoing().await
-    //         }
-    //         _ => run_incoming(prog).await,
-    //     },
-    //     _ => run_incoming(prog).await,
-    // }
 }
