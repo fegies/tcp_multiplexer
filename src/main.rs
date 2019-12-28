@@ -55,6 +55,8 @@ pub struct DispatcherTunnelMessage {
 enum Opts {
     TestBinary {},
     Incoming {
+        #[structopt(short,long,default_value="8001")]
+        port: u16,
         command: String,
         args: Vec<String>,
     },
@@ -70,8 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("binary is ok");
             Ok(())
         },
-        Opts::Incoming { command, args } => {
-            run_incoming(command, args).await
+        Opts::Incoming { port, command, args } => {
+            run_incoming(port, command, args).await
         },
         Opts::Outgoing { target_connection: target } => {
             unsafe {

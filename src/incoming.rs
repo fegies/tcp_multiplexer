@@ -58,9 +58,10 @@ fn get_stdout(child: &Child) -> &mut tokio::process::ChildStdout {
     }
 }
 
-pub async fn run_incoming(prog: String, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_incoming(port: u16, prog: String, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     log!("Running incoming");
-    let addr: std::net::SocketAddrV4 = "0.0.0.0:8001".parse().unwrap();
+    let addr_str = format!("0.0.0.0:{}", port);
+    let addr: std::net::SocketAddrV4 = addr_str.parse().unwrap();
 
     let (tx, mut rx) = mpsc::channel::<DispatcherTunnelMessage>(10);
     let dispatcher = Arc::new(Dispatcher::new(tx));
