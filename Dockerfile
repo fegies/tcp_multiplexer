@@ -1,4 +1,4 @@
-FROM rust:1.40 as build
+FROM rust:1.41 as build
 
 WORKDIR /code
 # RUN apt-get update && apt-get install -y musl musl-dev musl-tools
