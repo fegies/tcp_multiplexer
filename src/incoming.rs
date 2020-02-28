@@ -31,34 +31,11 @@ async fn handle_incoming_connection(dispatcher: &Dispatcher, con: TcpStream) {
     });
 }
 
-use tokio::process::Child;
-#[allow(clippy::mut_from_ref)]
-fn get_stdin(child: &Child) -> &mut tokio::process::ChildStdin {
-    let ptr: *const Child = child;
-    unsafe {
-        (ptr as *mut Child)
-            .as_mut()
-            .unwrap()
-            .stdin()
-            .as_mut()
-            .unwrap()
-    }
-}
-
-#[allow(clippy::mut_from_ref)]
-fn get_stdout(child: &Child) -> &mut tokio::process::ChildStdout {
-    let ptr: *const Child = child;
-    unsafe {
-        (ptr as *mut Child)
-            .as_mut()
-            .unwrap()
-            .stdout()
-            .as_mut()
-            .unwrap()
-    }
-}
-
-pub async fn run_incoming(port: u16, prog: String, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_incoming(
+    port: u16,
+    prog: String,
+    args: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     log!("Running incoming");
     let addr_str = format!("0.0.0.0:{}", port);
     let addr: std::net::SocketAddrV4 = addr_str.parse().unwrap();
@@ -69,22 +46,19 @@ pub async fn run_incoming(port: u16, prog: String, args: Vec<String>) -> Result<
 
     //set up the tunnel
     tokio::spawn(async move {
-        let child = Arc::new(
-            tokio::process::Command::new(prog)
-                .args(args)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap(),
-        );
-        let child_inner = child.clone();
+        let child = tokio::process::Command::new(prog)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
 
-        let pipe_write = get_stdin(&child);
-        let mut framed_tunnel_write = FramedWrite::new(pipe_write, TunnelCodec::new());
+        let (child_out, child_in) = crate::child_split::split_child(child).unwrap();
+
+        let mut framed_tunnel_write = FramedWrite::new(child_in, TunnelCodec::new());
 
         tokio::spawn(async move {
-            let pipe_read = get_stdout(&child_inner);
-            let mut framed_tunnel_read = FramedRead::new(pipe_read, TunnelCodec::new());
+            let mut framed_tunnel_read = FramedRead::new(child_out, TunnelCodec::new());
             loop {
                 let val = framed_tunnel_read.next().await.unwrap().unwrap();
                 dispatch_message_to_incoming(&dispatcher_inner, val)

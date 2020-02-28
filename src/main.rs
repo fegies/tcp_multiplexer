@@ -2,12 +2,12 @@ use bytes::{Bytes, BytesMut};
 use futures::sink::SinkExt;
 
 use std::sync::Arc;
+use structopt::StructOpt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use structopt::StructOpt;
 
 #[cfg(feature = "logging")]
 macro_rules! log {
@@ -34,6 +34,7 @@ mod incoming;
 use incoming::*;
 mod outgoing;
 use outgoing::*;
+mod child_split;
 
 const BUF_SIZE: usize = 2048;
 type ConnectionId = u32;
@@ -51,17 +52,17 @@ pub struct DispatcherTunnelMessage {
 }
 
 #[derive(StructOpt, Debug)]
-#[structopt(version="0.1", author="Felix Giese")]
+#[structopt(version = "0.1", author = "Felix Giese")]
 enum Opts {
     TestBinary {},
     Incoming {
-        #[structopt(short,long,default_value="8001")]
+        #[structopt(short, long, default_value = "8001")]
         port: u16,
         command: String,
         args: Vec<String>,
     },
     Outgoing {
-        target_connection: std::net::SocketAddr
+        target_connection: std::net::SocketAddr,
     },
 }
 
@@ -71,11 +72,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Opts::TestBinary {} => {
             println!("binary is ok");
             Ok(())
-        },
-        Opts::Incoming { port, command, args } => {
-            run_incoming(port, command, args).await
-        },
-        Opts::Outgoing { target_connection: target } => {
+        }
+        Opts::Incoming {
+            port,
+            command,
+            args,
+        } => run_incoming(port, command, args).await,
+        Opts::Outgoing {
+            target_connection: target,
+        } => {
             unsafe {
                 IN_OR_OUT = "outgoing >>>";
             }
